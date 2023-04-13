@@ -1,0 +1,13 @@
+.vscode/*
+result/*
+script/*
+
+# Logs and databases #
+*.log
+*.qdrep
+*.sqlite
+
+# Compiled source #
+*.o
+*.so
+slicedAMM

@@ -1,0 +1,1 @@
+for i in range(6*8, 16*8+1): print("{} ".format(int(2**(i/8)/32)*32), end="")
