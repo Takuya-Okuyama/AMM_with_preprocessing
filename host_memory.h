@@ -22,9 +22,9 @@ class host_memory
 {
 public:
   uint64_t m = DIM_M;
+  uint64_t k = DIM_M;
   uint64_t n = DIM_M;
-  uint32_t nsamples = DIM_M;
-  uint32_t slicesize = 32;
+  uint32_t c = DIM_M;
 
   std::string kernel = "exact";
   std::string matrixType_A = "gaussian_0.0_1.0";
@@ -42,6 +42,8 @@ public:
   float total_normA = 0.0f;
   float total_normB = 0.0f;
   float total_normAB = 0.0f;
+  float *h_normA = nullptr;
+  float *h_normB = nullptr;
 
   bool sanity_check = false;
   bool show_all_errors = false;
@@ -60,6 +62,9 @@ public:
     delete hY;
     delete hY_ref;
 
+    delete h_normA;
+    delete h_normB;
+
     cudaEventDestroy(start);
     cudaEventDestroy(stop);
   }
@@ -73,22 +78,23 @@ public:
         m = std::atoi(argv[++i]);
         m = DIV_CEIL(m, (uint64_t)DIM_M) * DIM_M;
       }
+      else if (!strcmp(argv[i], "-k"))
+      {
+        k = std::atoi(argv[++i]);
+        k = DIV_CEIL(k, (uint64_t)DIM_M) * DIM_M;
+      }
       else if (!strcmp(argv[i], "-n"))
       {
         n = std::atoi(argv[++i]);
         n = DIV_CEIL(n, (uint64_t)DIM_M) * DIM_M;
       }
-      else if (!strcmp(argv[i], "-s"))
+      else if (!strcmp(argv[i], "-c"))
       {
-        nsamples = std::atoi(argv[++i]);
+        c = std::atoi(argv[++i]);
       }
       else if (!strcmp(argv[i], "-r"))
       {
         nreps = std::atoi(argv[++i]);
-      }
-      else if (!strcmp(argv[i], "-slicesize"))
-      {
-        slicesize = std::atoi(argv[++i]);
       }
       else if (!strcmp(argv[i], "-kernel"))
       {
@@ -136,45 +142,27 @@ public:
     {
       sanity_check = false;
     }
-    else if (kernel != "basicAMM" && kernel != "slicedAMM")
+    else if (kernel != "previousAMM" && kernel != "proposedAMM")
     {
       printf("[error] '-kernel %s' is not valid.\n", kernel.c_str());
       return false;
     }
 
-    bool check = false;
-    const uint32_t ary_of_slicesize[] = {1, 2, 4};
-    for (std::size_t i = 0; i < sizeof(ary_of_slicesize) / sizeof(uint32_t); ++i)
-    {
-      if (ary_of_slicesize[i] == slicesize)
-      {
-        check = true;
-        break;
-      }
-    }
-    if (!check)
-    {
-      printf("[error] '-slicesize %d' is not valid.\n", slicesize);
-      return false;
-    }
-
-    nsamples = DIV_CEIL(nsamples, slicesize) * slicesize;
-
-    assert(0 < nsamples);
-    assert(nsamples <= n);
+    assert(1 <= c);
+    assert(c <= k);
 
     if (verbose >= 2)
     {
       printf("[info] Parameters are as follows.\n");
-      printf("\tkernel    : %s\n", kernel.c_str());
-      printf("\tm         = %ld\n", m);
-      printf("\tn         = %ld\n", n);
-      printf("\tnsamples  = %u\n", nsamples);
-      printf("\tslicesize = %u\n", slicesize);
-      printf("\tnreps     = %u\n", nreps);
-      printf("\talpha     = %f\n", alpha);
-      printf("\tbeta      = %f\n", beta);
-      printf("\tseed      = %d\n", seed);
+      printf("\tkernel: %s\n", kernel.c_str());
+      printf("\tm     = %" PRIu64 "\n", m);
+      printf("\tk     = %" PRIu64 "\n", k);
+      printf("\tn     = %" PRIu64 "\n", n);
+      printf("\tc     = %u\n", c);
+      printf("\tnreps = %u\n", nreps);
+      printf("\talpha = %f\n", alpha);
+      printf("\tbeta  = %f\n", beta);
+      printf("\tseed  = %d\n", seed);
 
       printf("[info] Sanity check : %s\n", sanity_check ? "on" : "off");
     }
@@ -184,8 +172,11 @@ public:
 
   void allocate_memory()
   {
-    hY = new float[m];
-    hY_ref = new float[m];
+    hY = new float[m * n];
+    hY_ref = new float[m * n];
+
+    h_normA = new float[k];
+    h_normB = new float[k];
   }
 
   void start_timer(bool reset = true)
@@ -212,6 +203,20 @@ public:
     return elapsed_time;
   }
 
+  double get_theoretical_Frobenius_error() const
+  {
+    double sum = 0.0;
+    for (int i = 0; i < k; i++)
+    {
+      sum += h_normA[i] * h_normB[i];
+      //printf("%f, %f\n", h_normA[i], h_normB[i]);
+    }
+    //printf("sum = %f\n", sum);
+    //printf("total_normAB = %f\n", total_normAB);
+
+    return sqrt((sum * sum - total_normAB * total_normAB) / (double)c);
+  }
+
   void print_result()
   {
     if (verbose >= 1)
@@ -219,10 +224,10 @@ public:
       // basic information
       printf("DIM_M,");
       printf("-m,");
+      printf("-k,");
       printf("-n,");
       printf("-s,");
       printf("-r,");
-      printf("-slicesize,");
       printf("-kernel,");
       printf("-matrixType_A,");
       printf("-matrixType_B,");
@@ -236,6 +241,7 @@ public:
       printf("Frobenius norm of AB,");
       printf("total time [ms],");
       printf("average time [ms],");
+      printf("theoretical error,");
       printf("50%%-tile error,");
       printf("25%%-tile error,");
       printf("75%%-tile error,");
@@ -249,11 +255,11 @@ public:
 
     // basic information
     printf("%d,", DIM_M);
-    printf("%ld,", m);
-    printf("%ld,", n);
-    printf("%d,", nsamples);
+    printf("%" PRIu64 ",", m);
+    printf("%" PRIu64 ",", k);
+    printf("%" PRIu64 ",", n);
+    printf("%d,", c);
     printf("%d,", nreps);
-    printf("%d,", slicesize);
     printf("%s,", kernel.c_str());
     printf("%s,", matrixType_A.c_str());
     printf("%s,", matrixType_B.c_str());
@@ -267,6 +273,7 @@ public:
     printf("%lf,", total_normAB);
     printf("%f,", get_elapsed_millisecond_time());
     printf("%f,", get_elapsed_millisecond_time() / nreps);
+    printf("%lf,", get_theoretical_Frobenius_error());
     printf("%f,", (kernel == "exact") ? 0.0 : error[int(0.50 * error.size())]);
     printf("%f,", (kernel == "exact") ? 0.0 : error[int(0.25 * error.size())]);
     printf("%f", (kernel == "exact") ? 0.0 : error[int(0.75 * error.size())]);
@@ -277,6 +284,10 @@ public:
       {
         printf(",%f", error[i]);
       }
+    }
+    else
+    {
+      printf(",-");
     }
     printf("\n");
   }

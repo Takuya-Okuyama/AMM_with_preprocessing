@@ -12,6 +12,7 @@
 
 // Header
 #include <cassert>
+#include <cinttypes>
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
 #include "host_memory.h"

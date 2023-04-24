@@ -1,43 +1,44 @@
 #include "common.h"
-#include "sgemv_with_basicAMM.h"
-#include "sgemv_with_slicedAMM.h"
+#include "sgemm_previousAMM.h"
+//#include "sgemv_with_proposedAMM.h"
 
 void test(
     host_memory &p,
     device_memory &dm)
 {
-  if (p.kernel == "basicAMM" || p.slicesize == 1)
+  if (p.kernel == "previousAMM")
   {
-    sgemv_with_basicAMM<DIM_M>(dm, true);
+    sgemm_previousAMM<DIM_M>(dm, true);
   }
-  else if (p.kernel == "slicedAMM")
+  else if (p.kernel == "proposedAMM")
   {
-    sgemv_with_slicedAMM<DIM_M>(dm, true);
+    //sgemv_with_proposedAMM<DIM_M>(dm, true);
   }
 
-  cublasSgemv(dm.handle,
+  cublasSgemm(dm.handle,
               CUBLAS_OP_N,
-              p.m, p.n,
+              CUBLAS_OP_N,
+              p.m, p.n, p.k,
               &p.alpha,
               dm.dA, p.m,
-              dm.dB, 1,
+              dm.dB, p.k,
               &p.beta,
-              dm.dY_ref, 1);
+              dm.dY_ref, p.m);
 
   cudaDeviceSynchronize();
-  cudaMemcpy(p.hY, dm.dY, sizeof(float) * p.m, cudaMemcpyDeviceToHost);
-  cudaMemcpy(p.hY_ref, dm.dY_ref, sizeof(float) * p.m, cudaMemcpyDeviceToHost);
+  cudaMemcpy(p.hY, dm.dY, sizeof(float) * p.m * p.n, cudaMemcpyDeviceToHost);
+  cudaMemcpy(p.hY_ref, dm.dY_ref, sizeof(float) * p.m * p.n, cudaMemcpyDeviceToHost);
   cudaDeviceSynchronize();
 
   printf("[info] elements obtained by MM and AMM\n");
   printf("my kernel,cuBLAS\n");
-  for (int i = 0; i < p.m; i++)
+  for (int i = 0; i < p.m * p.n; i++)
   {
     printf("%f, %f\n", p.hY[i], p.hY_ref[i]);
   }
 }
 
-void execute_selected_kernel(
+void execute_kernel(
     host_memory &p,
     device_memory &dm,
     const bool warmup = false)
@@ -46,19 +47,20 @@ void execute_selected_kernel(
   {
     if (warmup)
     {
-      cublasSgemv(dm.handle,
+      cublasSgemm(dm.handle,
                   CUBLAS_OP_N,
-                  p.m, p.n,
+                  CUBLAS_OP_N,
+                  p.m, p.n, p.k,
                   &p.alpha,
                   dm.dA, p.m,
-                  dm.dB, 1,
+                  dm.dB, p.k,
                   &p.beta,
-                  dm.dY_ref, 1);
+                  dm.dY_ref, p.m);
 
-      cudaMemcpy(p.hY_ref, dm.dY_ref, sizeof(float) * p.m, cudaMemcpyDefault);
+      cudaMemcpy(p.hY_ref, dm.dY_ref, sizeof(float) * p.m * p.n, cudaMemcpyDefault);
 
       // calculate Frobenius norm of AB
-      cublasSnrm2(dm.handle, dm.m, dm.dY_ref, 1, &p.total_normAB);
+      cublasSnrm2(dm.handle, dm.m * p.n, dm.dY_ref, 1, &p.total_normAB);
     }
     else
     {
@@ -66,24 +68,25 @@ void execute_selected_kernel(
       p.start_timer();
       for (int i = 0; i < p.nreps; ++i)
       {
-        cublasSgemv(dm.handle,
+        cublasSgemm(dm.handle,
                     CUBLAS_OP_N,
-                    p.m, p.n,
+                    CUBLAS_OP_N,
+                    p.m, p.n, p.k,
                     &p.alpha,
                     dm.dA, p.m,
-                    dm.dB, 1,
+                    dm.dB, p.k,
                     &p.beta,
-                    dm.dY, 1);
+                    dm.dY_ref, p.m);
       }
       p.stop_timer();
     }
   }
 
-  if (dm.kernel == "basicAMM" || dm.slicesize == 1)
+  if (dm.kernel == "previousAMM")
   {
     if (warmup)
     {
-      sgemv_with_basicAMM<DIM_M>(dm);
+      sgemm_previousAMM<DIM_M>(dm);
     }
     else
     {
@@ -91,11 +94,11 @@ void execute_selected_kernel(
       p.error.clear();
       for (int i = 0; i < p.nreps; ++i)
       {
-        sgemv_with_basicAMM<DIM_M>(dm);
+        sgemm_previousAMM<DIM_M>(dm);
 
         cudaDeviceSynchronize();
-        cudaMemcpy(p.hY, dm.dY, sizeof(float) * p.m, cudaMemcpyDefault);
-        double err = get_error(p.hY_ref, p.hY, p.m);
+        cudaMemcpy(p.hY, dm.dY, sizeof(float) * p.m * p.n, cudaMemcpyDefault);
+        double err = get_error(p.hY_ref, p.hY, p.m * p.n);
         p.error.push_back(err);
 
         if (p.sanity_check)
@@ -103,31 +106,29 @@ void execute_selected_kernel(
           const float const_one = 1.0;
           if (i == 0)
           {
-            cudaMemcpy(dm.dY_avg, dm.dY, sizeof(float) * p.m, cudaMemcpyDefault);
+            cudaMemcpy(dm.dY_avg, dm.dY, sizeof(float) * p.m * p.n, cudaMemcpyDefault);
           }
           else
           {
-            cublasSaxpy(dm.handle, p.m, &const_one, dm.dY, 1, dm.dY_avg, 1);
+            cublasSaxpy(dm.handle, p.m * p.n, &const_one, dm.dY, 1, dm.dY_avg, 1);
           }
         }
       }
 
       // measure time
       p.start_timer();
-      cudaDeviceSynchronize();
       for (int i = 0; i < p.nreps; ++i)
       {
-        sgemv_with_basicAMM<DIM_M>(dm);
+        sgemm_previousAMM<DIM_M>(dm);
       }
-      cudaDeviceSynchronize();
       p.stop_timer();
     }
   }
-  else if (p.kernel == "slicedAMM")
+  else if (p.kernel == "proposedAMM")
   {
     if (warmup)
     {
-      sgemv_with_slicedAMM<DIM_M>(dm);
+      //sgemv_with_proposedAMM<DIM_M>(dm);
     }
     else
     {
@@ -135,11 +136,11 @@ void execute_selected_kernel(
       p.error.clear();
       for (int i = 0; i < p.nreps; ++i)
       {
-        sgemv_with_slicedAMM<DIM_M>(dm);
+        //sgemv_with_proposedAMM<DIM_M>(dm);
 
         cudaDeviceSynchronize();
-        cudaMemcpy(p.hY, dm.dY, sizeof(float) * p.m, cudaMemcpyDefault);
-        double err = get_error(p.hY_ref, p.hY, p.m);
+        cudaMemcpy(p.hY, dm.dY, sizeof(float) * p.m * p.n, cudaMemcpyDefault);
+        double err = get_error(p.hY_ref, p.hY, p.m * p.n);
         p.error.push_back(err);
 
         if (p.sanity_check)
@@ -147,11 +148,11 @@ void execute_selected_kernel(
           const float const_one = 1.0;
           if (i == 0)
           {
-            cudaMemcpy(dm.dY_avg, dm.dY, sizeof(float) * p.m, cudaMemcpyDefault);
+            cudaMemcpy(dm.dY_avg, dm.dY, sizeof(float) * p.m * p.n, cudaMemcpyDefault);
           }
           else
           {
-            cublasSaxpy(dm.handle, p.m, &const_one, dm.dY, 1, dm.dY_avg, 1);
+            cublasSaxpy(dm.handle, p.m * p.n, &const_one, dm.dY, 1, dm.dY_avg, 1);
           }
         }
       }
@@ -162,7 +163,7 @@ void execute_selected_kernel(
     p.start_timer();
     for (int i = 0; i < p.nreps; ++i)
     {
-      sgemv_with_slicedAMM<DIM_M>(dm);
+      //sgemv_with_proposedAMM<DIM_M>(dm);
     }
     cudaDeviceSynchronize();
     p.stop_timer();
@@ -170,7 +171,7 @@ void execute_selected_kernel(
 
   if (p.sanity_check && !warmup)
   {
-    cudaMemcpy(p.hY, dm.dY_avg, sizeof(float) * p.m, cudaMemcpyDefault);
+    cudaMemcpy(p.hY, dm.dY_avg, sizeof(float) * p.m * p.n, cudaMemcpyDefault);
 
     printf("[info] elements obtained by MM and AMM\n");
     printf("my kernel,cuBLAS\n");
@@ -195,7 +196,7 @@ int main(int argc, char *argv[])
   dm.set_internal_randomness();
 
   // check validity of hand-written kernel
-  if (p.sanity_check && p.n == p.nsamples)
+  if (p.sanity_check && p.k == p.c)
   {
     test(p, dm);
     return 0;
@@ -204,11 +205,11 @@ int main(int argc, char *argv[])
   curandSetPseudoRandomGeneratorSeed(dm.gen, 1234ULL);
 
   // warm-up
-  execute_selected_kernel(p, dm, true);
+  execute_kernel(p, dm, true);
   cudaDeviceSynchronize();
 
   // measure time
-  execute_selected_kernel(p, dm);
+  execute_kernel(p, dm);
 
   // display info
   p.print_result();

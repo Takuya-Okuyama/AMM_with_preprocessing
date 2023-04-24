@@ -16,6 +16,40 @@
 #include <random>
 #include <sstream>
 
+__global__ __launch_bounds__(128) void get_norms(
+    float *d_normA,
+    float *d_normB,
+    const float *dA,
+    const float *dB,
+    const uint64_t m,
+    const uint64_t n,
+    const uint64_t k)
+{
+  uint64_t idx = blockDim.x * blockIdx.x + threadIdx.x;
+  if (idx < k)
+  {
+    double sum = 0.0;
+    const float *ptr = dA + m * idx;
+    for (int i = 0; i < m; i++)
+    {
+      double v = *ptr;
+      sum = fma(v, v, sum);
+      ptr++;
+    }
+    d_normA[idx] = (float)sqrt(sum);
+
+    sum = 0.0;
+    ptr = dB + idx;
+    for (int i = 0; i < n; i++)
+    {
+      double v = *ptr;
+      sum = fma(v, v, sum);
+      ptr += k;
+    }
+    d_normB[idx] = (float)sqrt(sum);
+  }
+}
+
 struct Item
 {
   uint32_t ID[8];
@@ -28,7 +62,7 @@ struct Item
     uint32_t y = rnd;
 
     Item tc;
-    //tc.ID = (total_weight / rhs.total_weight < y / RAND_MAX) ? this->ID : rhs.ID;
+    // tc.ID = (total_weight / rhs.total_weight < y / RAND_MAX) ? this->ID : rhs.ID;
 
     const auto threshold = weight * (float)UINT32_MAX;
 
@@ -83,6 +117,7 @@ struct device_memory
   float *dY_avg = nullptr;
 
   float *d_normA = nullptr;
+  float *d_normB = nullptr;
 
   float *d_weight = nullptr;
   float *d_acc_weight = nullptr;
@@ -105,53 +140,45 @@ struct device_memory
   cudaEvent_t event_scale;
 
   uint64_t m = 0;
+  uint64_t k = 0;
   uint64_t n = 0;
+  uint64_t c = 1;
   float alpha = 0.0;
   float beta = 0.0;
   std::string kernel;
 
-  uint32_t nslices_total = 0;
-  uint32_t nslices_select = 0;
-  uint32_t slicesize = 0;
-
   device_memory(host_memory &p)
   {
     m = p.m;
+    k = p.k;
     n = p.n;
+    c = p.c;
     seed = p.seed;
 
     alpha = p.alpha;
     beta = p.beta;
     kernel = p.kernel;
-    slicesize = p.slicesize;
 
-    nslices_total = n;
-    nslices_select = p.nsamples;
+    cudaMalloc((void **)&dA, sizeof(float) * m * k);
+    cudaMalloc((void **)&dB, sizeof(float) * k * n);
+    cudaMalloc((void **)&dY, sizeof(float) * m * n);
+    cudaMalloc((void **)&dY_ref, sizeof(float) * m * n);
+    cudaMalloc((void **)&dY_avg, sizeof(float) * m * n);
 
-    if (kernel == "slicedAMM")
-    {
-      nslices_select /= p.slicesize;
-    }
+    cudaMalloc((void **)&d_normA, sizeof(float) * k);
+    cudaMalloc((void **)&d_normB, sizeof(float) * k);
+    cudaMalloc((void **)&d_weight, sizeof(float) * k);
+    cudaMalloc((void **)&d_acc_weight, sizeof(float) * k);
 
-    cudaMalloc((void **)&dA, sizeof(float) * m * n);
-    cudaMalloc((void **)&dB, sizeof(float) * n);
-    cudaMalloc((void **)&dY, sizeof(float) * m);
-    cudaMalloc((void **)&dY_ref, sizeof(float) * m);
-    cudaMalloc((void **)&dY_avg, sizeof(float) * m);
+    cudaMalloc((void **)&d_item, sizeof(Item) * k);
+    cudaMalloc((void **)&d_item_result, sizeof(k));
 
-    cudaMalloc((void **)&d_normA, sizeof(float) * nslices_total);
-    cudaMalloc((void **)&d_weight, sizeof(float) * nslices_total);
-    cudaMalloc((void **)&d_acc_weight, sizeof(float) * nslices_total);
-
-    cudaMalloc((void **)&d_item, sizeof(Item) * nslices_total);
-    cudaMalloc((void **)&d_item_result, sizeof(Item));
-
-    cudaMalloc((void **)&d_rnd, sizeof(uint32_t) * nslices_select);
-    cudaMalloc((void **)&d_pos, sizeof(uint32_t) * nslices_select);
+    cudaMalloc((void **)&d_rnd, sizeof(uint32_t) * c);
+    cudaMalloc((void **)&d_pos, sizeof(uint32_t) * c);
 
     cublasCreate(&handle);
-    cublasSetAtomicsMode(handle, CUBLAS_ATOMICS_ALLOWED);
-    //cublasSetMathMode(handle, CUBLAS_TENSOR_OP_MATH);
+    // cublasSetAtomicsMode(handle, CUBLAS_ATOMICS_ALLOWED);
+    // cublasSetMathMode(handle, CUBLAS_TENSOR_OP_MATH);
 
     curandCreateGenerator(&gen, CURAND_RNG_PSEUDO_DEFAULT);
 
@@ -163,14 +190,14 @@ struct device_memory
                                   storageBytes_inclusiveSum,
                                   d_weight,
                                   d_acc_weight,
-                                  nslices_total,
+                                  k,
                                   stream_2);
 
     cub::DeviceReduce::Sum(d_tmp_sum,
                            storageBytes_sum,
                            d_item,
                            d_item_result,
-                           nslices_total);
+                           k);
 
     // Allocate temporary storage
     cudaMalloc(&d_tmp_inclusiveSum, storageBytes_inclusiveSum);
@@ -186,6 +213,7 @@ struct device_memory
     cudaFree(dY_avg);
 
     cudaFree(d_normA);
+    cudaFree(d_normB);
     cudaFree(d_weight);
     cudaFree(d_acc_weight);
 
@@ -201,32 +229,28 @@ struct device_memory
     curandDestroyGenerator(gen);
     cudaStreamDestroy(stream_1);
     cudaStreamDestroy(stream_2);
-    //cudaEventDestroy(event_scale);
+    // cudaEventDestroy(event_scale);
   }
 
   void write_data(host_memory &p)
   {
     curandSetPseudoRandomGeneratorSeed(gen, seed);
 
-    p.total_normA = generate_matrix(dA, m, n, p.matrixType_A);
-    p.total_normB = generate_matrix(dB, n, 1, p.matrixType_B);
+    p.total_normA = generate_matrix(dA, m, k, p.matrixType_A);
+    p.total_normB = generate_matrix(dB, n, k, p.matrixType_B);
 
+    printf("p.total_normA = %lf\n", p.total_normA);
+    printf("p.total_normB = %lf\n", p.total_normB);
+
+    // zero clear
     const float const_zero = 0.0;
-    cublasSscal(handle, m, &const_zero, dY, 1);
-    cublasSscal(handle, m, &const_zero, dY_ref, 1);
+    cublasSscal(handle, m * n, &const_zero, dY, 1);
+    cublasSscal(handle, m * n, &const_zero, dY_ref, 1);
 
-    // calculate norm of A
-    float *h_normA = new float[nslices_total];
-    float *ptr_A = dA;
-    const std::size_t size = m * (n / nslices_total);
-    for (uint32_t i = 0; i < nslices_total; ++i)
-    {
-      cublasSnrm2(handle, size, ptr_A, 1, h_normA + i);
-      ptr_A += size;
-    }
-
-    cudaMemcpy(d_normA, h_normA, sizeof(float) * nslices_total, cudaMemcpyDefault);
-    delete h_normA;
+    // calculate norms
+    get_norms<<<DIV_CEIL(k, (uint64_t)128), 128>>>(d_normA, d_normB, dA, dB, m, n, k);
+    cudaMemcpy(p.h_normA, d_normA, sizeof(float) * k, cudaMemcpyDefault);
+    cudaMemcpy(p.h_normB, d_normB, sizeof(float) * k, cudaMemcpyDefault);
   }
 
   /*float get_error() const
@@ -238,15 +262,15 @@ struct device_memory
   void set_internal_randomness()
   {
     curandSetPseudoRandomGeneratorSeed(gen, seed + 1234);
-    curandGenerate(gen, d_rnd, nslices_select);
+    curandGenerate(gen, d_rnd, c);
   }
 
 private:
   uint32_t seed;
 
   float generate_matrix(float *d_ptr,
-                        const uint64_t m,
-                        const uint64_t n,
+                        const uint64_t size_v,
+                        const uint64_t size_h,
                         const std::string &type) const
   {
     std::string matrixType;
@@ -255,15 +279,15 @@ private:
 
     if (matrixType == "gaussian")
     {
-      curandGenerateNormal(gen, d_ptr, m * n, param1, param2);
+      curandGenerateNormal(gen, d_ptr, size_v * size_h, param1, param2);
     }
     else if (matrixType == "lognormal")
     {
-      curandGenerateLogNormal(gen, d_ptr, m * n, param1, param2);
+      curandGenerateLogNormal(gen, d_ptr, size_v * size_h, param1, param2);
     }
 
     float norm = 0.0f;
-    cublasSnrm2(handle, m * n, d_ptr, 1, &norm);
+    cublasSnrm2(handle, size_v * size_h, d_ptr, 1, &norm);
     return norm;
   }
 
@@ -319,7 +343,6 @@ float get_error(
   double ret = 0.0;
   for (uint64_t i = 0; i < len; ++i)
   {
-    //printf("%f, %f\n", h1[i], h2[i]);
     double v = (double)h1[i] - (double)h2[i];
     ret += v * v;
   }
@@ -338,19 +361,19 @@ __device__ __forceinline__ float get_rand(uint32_t *x)
 }
 
 __global__ __launch_bounds__(DIM_M) void pick_index(
-    uint32_t *d_pos,
+    uint32_t *__restrict__ d_pos,
     uint32_t *__restrict__ d_rnd,
     const float *__restrict__ d_acc_weight,
-    const uint32_t nslices_total,
-    const uint32_t nslices_select)
+    const uint64_t ntotal,
+    const uint64_t nselect)
 {
-  uint32_t idx = blockDim.x * blockIdx.x + threadIdx.x;
-  if (idx >= nslices_select)
+  uint64_t idx = blockDim.x * blockIdx.x + threadIdx.x;
+  if (idx >= nselect)
   {
     return;
   }
 
-  int bound_idx[2] = {-1, (int)nslices_total - 1};
+  int bound_idx[2] = {-1, (int)ntotal - 1};
   float bound_val[2] = {0.0f, d_acc_weight[bound_idx[1]]};
   const float target_val = bound_val[1] * get_rand(&d_rnd[idx]);
 
@@ -369,9 +392,9 @@ __global__ __launch_bounds__(DIM_M) void pick_index(
 
 __global__ __launch_bounds__(32) void set_sequential(
     uint32_t *d_pos,
-    const uint32_t n)
+    const uint64_t n)
 {
-  uint32_t idx = blockDim.x * blockIdx.x + threadIdx.x;
+  uint64_t idx = blockDim.x * blockIdx.x + threadIdx.x;
   if (idx < n)
   {
     d_pos[idx] = idx;
