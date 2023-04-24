@@ -10,4 +10,4 @@ script/*
 # Compiled source #
 *.o
 *.so
-slicedAMM
+AMM
