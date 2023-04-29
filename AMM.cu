@@ -1,6 +1,6 @@
 #include "common.h"
 #include "sgemm_previousAMM.h"
-//#include "sgemv_with_proposedAMM.h"
+#include "sgemm_proposedAMM.h"
 
 void test(
     host_memory &p,
@@ -12,17 +12,17 @@ void test(
   }
   else if (p.kernel == "proposedAMM")
   {
-    //sgemv_with_proposedAMM<DIM_M>(dm, true);
+    sgemm_proposedAMM<DIM_M>(dm, true);
   }
 
   cublasSgemm(dm.handle,
               CUBLAS_OP_N,
-              CUBLAS_OP_N,
+              CUBLAS_OP_T,
               p.m, p.n, p.k,
-              &p.alpha,
+              &p.const_one,
               dm.dA, p.m,
-              dm.dB, p.k,
-              &p.beta,
+              dm.dB, p.n,
+              &p.const_zero,
               dm.dY_ref, p.m);
 
   cudaDeviceSynchronize();
@@ -49,18 +49,18 @@ void execute_kernel(
     {
       cublasSgemm(dm.handle,
                   CUBLAS_OP_N,
-                  CUBLAS_OP_N,
+                  CUBLAS_OP_T,
                   p.m, p.n, p.k,
-                  &p.alpha,
+                  &p.const_one,
                   dm.dA, p.m,
-                  dm.dB, p.k,
-                  &p.beta,
+                  dm.dB, p.n,
+                  &p.const_zero,
                   dm.dY_ref, p.m);
 
       cudaMemcpy(p.hY_ref, dm.dY_ref, sizeof(float) * p.m * p.n, cudaMemcpyDefault);
 
       // calculate Frobenius norm of AB
-      cublasSnrm2(dm.handle, dm.m * p.n, dm.dY_ref, 1, &p.total_normAB);
+      cublasSnrm2(dm.handle, dm.m * p.n, dm.dY_ref, 1, &p.FrobeniusNorm_AB);
     }
     else
     {
@@ -70,12 +70,12 @@ void execute_kernel(
       {
         cublasSgemm(dm.handle,
                     CUBLAS_OP_N,
-                    CUBLAS_OP_N,
+                    CUBLAS_OP_T,
                     p.m, p.n, p.k,
-                    &p.alpha,
+                    &p.const_one,
                     dm.dA, p.m,
-                    dm.dB, p.k,
-                    &p.beta,
+                    dm.dB, p.n,
+                    &p.const_zero,
                     dm.dY_ref, p.m);
       }
       p.stop_timer();
@@ -103,14 +103,13 @@ void execute_kernel(
 
         if (p.sanity_check)
         {
-          const float const_one = 1.0;
           if (i == 0)
           {
             cudaMemcpy(dm.dY_avg, dm.dY, sizeof(float) * p.m * p.n, cudaMemcpyDefault);
           }
           else
           {
-            cublasSaxpy(dm.handle, p.m * p.n, &const_one, dm.dY, 1, dm.dY_avg, 1);
+            cublasSaxpy(dm.handle, p.m * p.n, &p.const_one, dm.dY, 1, dm.dY_avg, 1);
           }
         }
       }
@@ -128,7 +127,31 @@ void execute_kernel(
   {
     if (warmup)
     {
-      //sgemv_with_proposedAMM<DIM_M>(dm);
+      cublasSgemv(dm.handle,
+                  CUBLAS_OP_N,
+                  p.m, p.k,
+                  &p.const_one,
+                  dm.dA, p.m,
+                  dm.d_beta, 1,
+                  &p.const_zero,
+                  dm.d_vc, 1);
+
+      cublasSgemv(dm.handle,
+                  CUBLAS_OP_N,
+                  p.n, p.k,
+                  &p.const_one,
+                  dm.dB, p.n,
+                  dm.d_alpha, 1,
+                  &p.const_zero,
+                  dm.d_vr, 1);
+
+      cublasSdot(dm.handle,
+                 p.k,
+                 dm.d_alpha, 1,
+                 dm.d_beta, 1,
+                 dm.d_w);
+
+      sgemm_proposedAMM<DIM_M>(dm);
     }
     else
     {
@@ -136,7 +159,7 @@ void execute_kernel(
       p.error.clear();
       for (int i = 0; i < p.nreps; ++i)
       {
-        //sgemv_with_proposedAMM<DIM_M>(dm);
+        sgemm_proposedAMM<DIM_M>(dm);
 
         cudaDeviceSynchronize();
         cudaMemcpy(p.hY, dm.dY, sizeof(float) * p.m * p.n, cudaMemcpyDefault);
@@ -145,25 +168,23 @@ void execute_kernel(
 
         if (p.sanity_check)
         {
-          const float const_one = 1.0;
           if (i == 0)
           {
             cudaMemcpy(dm.dY_avg, dm.dY, sizeof(float) * p.m * p.n, cudaMemcpyDefault);
           }
           else
           {
-            cublasSaxpy(dm.handle, p.m * p.n, &const_one, dm.dY, 1, dm.dY_avg, 1);
+            cublasSaxpy(dm.handle, p.m * p.n, &p.const_one, dm.dY, 1, dm.dY_avg, 1);
           }
         }
       }
     }
 
     // measure time
-    cudaDeviceSynchronize();
     p.start_timer();
     for (int i = 0; i < p.nreps; ++i)
     {
-      //sgemv_with_proposedAMM<DIM_M>(dm);
+      sgemm_proposedAMM<DIM_M>(dm);
     }
     cudaDeviceSynchronize();
     p.stop_timer();
@@ -211,8 +232,31 @@ int main(int argc, char *argv[])
   // measure time
   execute_kernel(p, dm);
 
+  if (p.kernel == "proposedAMM")
+  {
+    cudaDeviceSynchronize();
+    update_matrices<<<DIV_CEIL(dm.k, (uint64_t)128), 128>>>(
+        dm.dA, dm.dB,
+        dm.d_alpha, dm.d_beta,
+        dm.m, dm.n, dm.k);
+
+    cublasSgemm(dm.handle,
+                CUBLAS_OP_N,
+                CUBLAS_OP_T,
+                p.m, p.n, p.k,
+                &p.const_one,
+                dm.dA, p.m,
+                dm.dB, p.n,
+                &p.const_zero,
+                dm.dY_ref, p.m);
+
+    // calculate Frobenius norm of A'B'
+    cublasSnrm2(dm.handle, p.m * p.n, dm.dY_ref, 1, &p.FrobeniusNorm_modifiedAB);
+  }
+
   // display info
   p.print_result();
 
   return 0;
 }
+

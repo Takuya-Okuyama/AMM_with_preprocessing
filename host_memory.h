@@ -33,17 +33,20 @@ public:
   int verbose = 0;
   uint32_t nreps = 10;
   uint32_t seed;
-  float alpha = 1.0f;
-  float beta = 0.0f;
+  const float const_one = 1.0f;
+  const float const_zero = 0.0f;
 
   float *hY = nullptr;
   float *hY_ref = nullptr;
 
-  float total_normA = 0.0f;
-  float total_normB = 0.0f;
-  float total_normAB = 0.0f;
+  float FrobeniusNorm_A = 0.0f;
+  float FrobeniusNorm_B = 0.0f;
+  float FrobeniusNorm_AB = 0.0f;
+  float FrobeniusNorm_modifiedAB = 0.0f;
   float *h_normA = nullptr;
   float *h_normB = nullptr;
+  float *h_normAprime = nullptr;
+  float *h_normBprime = nullptr;
 
   bool sanity_check = false;
   bool show_all_errors = false;
@@ -64,6 +67,8 @@ public:
 
     delete h_normA;
     delete h_normB;
+    delete h_normAprime;
+    delete h_normBprime;
 
     cudaEventDestroy(start);
     cudaEventDestroy(stop);
@@ -116,14 +121,6 @@ public:
       {
         sanity_check = true;
       }
-      else if (!strcmp(argv[i], "-alpha"))
-      {
-        alpha = std::atof(argv[++i]);
-      }
-      else if (!strcmp(argv[i], "-beta"))
-      {
-        beta = std::atof(argv[++i]);
-      }
       else if (!strcmp(argv[i], "-verbose"))
       {
         verbose = std::atoi(argv[++i]);
@@ -150,6 +147,9 @@ public:
 
     assert(1 <= c);
     assert(c <= k);
+    assert(m % 128 == 0);
+    assert(n % 128 == 0);
+    assert(c % 8 == 0);
 
     if (verbose >= 2)
     {
@@ -160,8 +160,6 @@ public:
       printf("\tn     = %" PRIu64 "\n", n);
       printf("\tc     = %u\n", c);
       printf("\tnreps = %u\n", nreps);
-      printf("\talpha = %f\n", alpha);
-      printf("\tbeta  = %f\n", beta);
       printf("\tseed  = %d\n", seed);
 
       printf("[info] Sanity check : %s\n", sanity_check ? "on" : "off");
@@ -177,6 +175,8 @@ public:
 
     h_normA = new float[k];
     h_normB = new float[k];
+    h_normAprime = new float[k];
+    h_normBprime = new float[k];
   }
 
   void start_timer(bool reset = true)
@@ -205,16 +205,28 @@ public:
 
   double get_theoretical_Frobenius_error() const
   {
-    double sum = 0.0;
-    for (int i = 0; i < k; i++)
-    {
-      sum += h_normA[i] * h_normB[i];
-      //printf("%f, %f\n", h_normA[i], h_normB[i]);
-    }
-    //printf("sum = %f\n", sum);
-    //printf("total_normAB = %f\n", total_normAB);
+    double term1 = 0.0, term2 = 0.0;
 
-    return sqrt((sum * sum - total_normAB * total_normAB) / (double)c);
+    if (kernel == "previousAMM")
+    {
+      for (int i = 0; i < k; i++)
+      {
+        term1 = fma(h_normA[i], h_normB[i], term1);
+      }
+
+      term2 = FrobeniusNorm_AB;
+    }
+    else if (kernel == "proposedAMM")
+    {
+      for (int i = 0; i < k; i++)
+      {
+        term1 = fma(h_normAprime[i], h_normBprime[i], term1);
+      }
+
+      term2 = FrobeniusNorm_modifiedAB;
+    }
+
+    return sqrt((term1 * term1 - term2 * term2) / (double)c);
   }
 
   void print_result()
@@ -232,8 +244,6 @@ public:
       printf("-matrixType_A,");
       printf("-matrixType_B,");
       printf("-seed,");
-      printf("-alpha,");
-      printf("-beta,");
 
       // result
       printf("Frobenius norm of A,");
@@ -264,13 +274,11 @@ public:
     printf("%s,", matrixType_A.c_str());
     printf("%s,", matrixType_B.c_str());
     printf("%d,", seed);
-    printf("%f,", alpha);
-    printf("%f,", beta);
 
     // result
-    printf("%lf,", total_normA);
-    printf("%lf,", total_normB);
-    printf("%lf,", total_normAB);
+    printf("%lf,", FrobeniusNorm_A);
+    printf("%lf,", FrobeniusNorm_B);
+    printf("%lf,", FrobeniusNorm_AB);
     printf("%f,", get_elapsed_millisecond_time());
     printf("%f,", get_elapsed_millisecond_time() / nreps);
     printf("%lf,", get_theoretical_Frobenius_error());

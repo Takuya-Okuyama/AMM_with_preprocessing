@@ -19,6 +19,10 @@
 __global__ __launch_bounds__(128) void get_norms(
     float *d_normA,
     float *d_normB,
+    float *d_normAprime,
+    float *d_normBprime,
+    float *d_alpha,
+    float *d_beta,
     const float *dA,
     const float *dB,
     const uint64_t m,
@@ -28,85 +32,67 @@ __global__ __launch_bounds__(128) void get_norms(
   uint64_t idx = blockDim.x * blockIdx.x + threadIdx.x;
   if (idx < k)
   {
-    double sum = 0.0;
-    const float *ptr = dA + m * idx;
+    double sum = 0.0, sum_pow2 = 0.0;
+    uint64_t pos = m * idx;
     for (int i = 0; i < m; i++)
     {
-      double v = *ptr;
-      sum = fma(v, v, sum);
-      ptr++;
+      double v = dA[pos];
+      sum += v;
+      sum_pow2 = fma(v, v, sum_pow2);
+      pos++;
     }
-    d_normA[idx] = (float)sqrt(sum);
+
+    double mean = sum / (double)m;
+    d_alpha[idx] = (float)mean;
+    d_normA[idx] = (float)sqrt(sum_pow2);
+    d_normAprime[idx] = (float)sqrt(sum_pow2 - mean * mean * (double)m);
 
     sum = 0.0;
-    ptr = dB + idx;
+    sum_pow2 = 0.0;
+    pos = n * idx;
     for (int i = 0; i < n; i++)
     {
-      double v = *ptr;
-      sum = fma(v, v, sum);
-      ptr += k;
+      double v = dB[pos];
+      sum += v;
+      sum_pow2 = fma(v, v, sum_pow2);
+      pos++;
     }
-    d_normB[idx] = (float)sqrt(sum);
+
+    mean = sum / (double)n;
+    d_beta[idx] = (float)mean;
+    d_normB[idx] = (float)sqrt(sum_pow2);
+    d_normBprime[idx] = (float)sqrt(sum_pow2 - mean * mean * (double)n);
   }
 }
-
-struct Item
+__global__ __launch_bounds__(128) void update_matrices(
+    float *dA,
+    float *dB,
+    const float *d_alpha,
+    const float *d_beta,
+    const uint64_t m,
+    const uint64_t n,
+    const uint64_t k)
 {
-  uint32_t ID[8];
-  uint32_t rnd;
-  float norm;
-  float weight;
-
-  __host__ __device__ Item operator+(const Item rhs) const
+  uint64_t idx = blockDim.x * blockIdx.x + threadIdx.x;
+  if (idx < k)
   {
-    uint32_t y = rnd;
-
-    Item tc;
-    // tc.ID = (total_weight / rhs.total_weight < y / RAND_MAX) ? this->ID : rhs.ID;
-
-    const auto threshold = weight * (float)UINT32_MAX;
-
-#pragma unroll
-    for (int i = 0; i < 8; ++i)
+    uint64_t pos = m * idx;
+    float val = d_alpha[idx];
+    for (int i = 0; i < m; i++)
     {
-      y ^= (y << 13);
-      y ^= (y >> 17);
-      y ^= (y << 5);
-
-      tc.ID[i] = (threshold < (float)y * rhs.weight) ? this->ID[i] : rhs.ID[i];
+      dA[pos] -= val;
+      pos++;
     }
 
-    tc.rnd = y;
-    tc.weight = this->weight + rhs.weight;
-    return tc;
-  }
-
-  void set(
-      const uint32_t _ID,
-      const uint32_t _rnd,
-      const float _norm)
-  {
-    for (int i = 0; i < 8; ++i)
+    pos = n * idx;
+    val = d_beta[idx];
+    for (int i = 0; i < n; i++)
     {
-      ID[i] = _ID;
+      dB[pos] -= val;
+      pos++;
     }
-
-    rnd = _rnd;
-    norm = _norm;
   }
-
-  __host__ __device__ Item()
-  {
-    for (int i = 0; i < 8; ++i)
-    {
-      ID[i] = 2;
-    }
-
-    rnd = 2;
-    norm = 2;
-    weight = 2;
-  }
-};
+}
 
 struct device_memory
 {
@@ -118,20 +104,27 @@ struct device_memory
 
   float *d_normA = nullptr;
   float *d_normB = nullptr;
+  float *d_normAprime = nullptr;
+  float *d_normBprime = nullptr;
+
+  float *d_alpha = nullptr;
+  float *d_beta = nullptr;
+  float *d_vc = nullptr;
+  float *d_vr = nullptr;
+  float *d_w = nullptr;
 
   float *d_weight = nullptr;
   float *d_acc_weight = nullptr;
-  void *d_tmp_inclusiveSum = NULL;
-
-  Item *d_item = nullptr;
-  Item *d_item_result = nullptr;
-  void *d_tmp_sum = NULL;
+  void *d_tmp_inclusiveSum = nullptr;
+  void *d_tmp_sort = nullptr;
 
   std::size_t storageBytes_inclusiveSum = 0;
   std::size_t storageBytes_sum = 0;
+  std::size_t storageBytes_sort = 0;
 
   uint32_t *d_rnd = nullptr;
   uint32_t *d_pos = nullptr;
+  uint32_t *d_sorted_pos = nullptr;
 
   cublasHandle_t handle;
   curandGenerator_t gen;
@@ -143,8 +136,8 @@ struct device_memory
   uint64_t k = 0;
   uint64_t n = 0;
   uint64_t c = 1;
-  float alpha = 0.0;
-  float beta = 0.0;
+  float const_one = 1.0f;
+  float const_zero = 0.0f;
   std::string kernel;
 
   device_memory(host_memory &p)
@@ -154,9 +147,6 @@ struct device_memory
     n = p.n;
     c = p.c;
     seed = p.seed;
-
-    alpha = p.alpha;
-    beta = p.beta;
     kernel = p.kernel;
 
     cudaMalloc((void **)&dA, sizeof(float) * m * k);
@@ -167,14 +157,20 @@ struct device_memory
 
     cudaMalloc((void **)&d_normA, sizeof(float) * k);
     cudaMalloc((void **)&d_normB, sizeof(float) * k);
+    cudaMalloc((void **)&d_normAprime, sizeof(float) * k);
+    cudaMalloc((void **)&d_normBprime, sizeof(float) * k);
+
+    cudaMalloc((void **)&d_alpha, sizeof(float) * k);
+    cudaMalloc((void **)&d_beta, sizeof(float) * k);
+    cudaMalloc((void **)&d_vc, sizeof(float) * k);
+    cudaMalloc((void **)&d_vr, sizeof(float) * k);
+    cudaMalloc((void **)&d_w, sizeof(float));
     cudaMalloc((void **)&d_weight, sizeof(float) * k);
     cudaMalloc((void **)&d_acc_weight, sizeof(float) * k);
 
-    cudaMalloc((void **)&d_item, sizeof(Item) * k);
-    cudaMalloc((void **)&d_item_result, sizeof(k));
-
     cudaMalloc((void **)&d_rnd, sizeof(uint32_t) * c);
     cudaMalloc((void **)&d_pos, sizeof(uint32_t) * c);
+    cudaMalloc((void **)&d_sorted_pos, sizeof(uint32_t) * c);
 
     cublasCreate(&handle);
     // cublasSetAtomicsMode(handle, CUBLAS_ATOMICS_ALLOWED);
@@ -186,22 +182,26 @@ struct device_memory
     cudaStreamCreate(&stream_2);
 
     // Determine temporary device storage requirements
-    cub::DeviceScan::InclusiveSum(d_tmp_inclusiveSum,
-                                  storageBytes_inclusiveSum,
-                                  d_weight,
-                                  d_acc_weight,
-                                  k,
-                                  stream_2);
+    cub::DeviceScan::InclusiveSum(
+        d_tmp_inclusiveSum,
+        storageBytes_inclusiveSum,
+        d_weight,
+        d_acc_weight,
+        k,
+        stream_2);
 
-    cub::DeviceReduce::Sum(d_tmp_sum,
-                           storageBytes_sum,
-                           d_item,
-                           d_item_result,
-                           k);
+    cub::DeviceRadixSort::SortKeys(
+        d_tmp_sort,
+        storageBytes_sort,
+        d_pos,
+        d_sorted_pos,
+        c,
+        0, sizeof(uint32_t) * 8,
+        stream_2);
 
     // Allocate temporary storage
     cudaMalloc(&d_tmp_inclusiveSum, storageBytes_inclusiveSum);
-    cudaMalloc(&d_tmp_sum, storageBytes_sum);
+    cudaMalloc(&d_tmp_sort, storageBytes_sort);
   }
 
   ~device_memory()
@@ -214,17 +214,24 @@ struct device_memory
 
     cudaFree(d_normA);
     cudaFree(d_normB);
+    cudaFree(d_normAprime);
+    cudaFree(d_normBprime);
+
+    cudaFree(d_alpha);
+    cudaFree(d_beta);
+    cudaFree(d_vc);
+    cudaFree(d_vr);
+    cudaFree(d_w);
+
     cudaFree(d_weight);
     cudaFree(d_acc_weight);
 
-    cudaFree(d_item);
-    cudaFree(d_item_result);
-
     cudaFree(d_rnd);
     cudaFree(d_pos);
+    cudaFree(d_sorted_pos);
 
     cudaFree(d_tmp_inclusiveSum);
-    cudaFree(d_tmp_sum);
+    cudaFree(d_tmp_sort);
 
     curandDestroyGenerator(gen);
     cudaStreamDestroy(stream_1);
@@ -236,11 +243,14 @@ struct device_memory
   {
     curandSetPseudoRandomGeneratorSeed(gen, seed);
 
-    p.total_normA = generate_matrix(dA, m, k, p.matrixType_A);
-    p.total_normB = generate_matrix(dB, n, k, p.matrixType_B);
+    p.FrobeniusNorm_A = generate_matrix(dA, m, k, p.matrixType_A);
+    p.FrobeniusNorm_B = generate_matrix(dB, n, k, p.matrixType_B);
 
-    printf("p.total_normA = %lf\n", p.total_normA);
-    printf("p.total_normB = %lf\n", p.total_normB);
+    if (p.verbose >= 2)
+    {
+      printf("[info] Frobenius Norm of A = %lf\n", p.FrobeniusNorm_A);
+      printf("[info] Frobenius Norm of B = %lf\n", p.FrobeniusNorm_B);
+    }
 
     // zero clear
     const float const_zero = 0.0;
@@ -248,16 +258,20 @@ struct device_memory
     cublasSscal(handle, m * n, &const_zero, dY_ref, 1);
 
     // calculate norms
-    get_norms<<<DIV_CEIL(k, (uint64_t)128), 128>>>(d_normA, d_normB, dA, dB, m, n, k);
+    get_norms<<<DIV_CEIL(k, (uint64_t)128), 128>>>(
+        d_normA,
+        d_normB,
+        d_normAprime,
+        d_normBprime,
+        d_alpha, d_beta,
+        dA, dB,
+        m, n, k);
+
     cudaMemcpy(p.h_normA, d_normA, sizeof(float) * k, cudaMemcpyDefault);
     cudaMemcpy(p.h_normB, d_normB, sizeof(float) * k, cudaMemcpyDefault);
+    cudaMemcpy(p.h_normAprime, d_normAprime, sizeof(float) * k, cudaMemcpyDefault);
+    cudaMemcpy(p.h_normBprime, d_normBprime, sizeof(float) * k, cudaMemcpyDefault);
   }
-
-  /*float get_error() const
-  {
-    float ret = 0.0f;
-    cublasSnrm2(handle, m, dY, int incx, float  *result)
-  }*/
 
   void set_internal_randomness()
   {

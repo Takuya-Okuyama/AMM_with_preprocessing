@@ -11,3 +11,4 @@ script/*
 *.o
 *.so
 AMM
+cmd
