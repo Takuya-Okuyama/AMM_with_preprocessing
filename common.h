@@ -1,11 +1,6 @@
 #ifndef __COMMON_HEADER__
 #define __COMMON_HEADER__
 
-// Macro
-#define DIM_M 32
-#define KS_11 8
-#define LOOP_LEN 1024
-
 #ifdef DEBUG
 #define print_if_debugging(fmt, ...) printf(fmt, ##__VA_ARGS__);
 #else
@@ -25,6 +20,10 @@
 #include "host_memory.h"
 #include "device_memory.h"
 
+// Macro
+#define KS_11 8
+#define LOOP_LEN 1024
+
 #define A(i, j) A[(i) + (j)*M]
 #define B(i, j) B[(i) + (j)*N]
 #define ptr_A(i, j) ptr_A[(i) + (j)*M]
@@ -35,6 +34,7 @@
 #define ptr_sa11(i, j) ptr_sa11[((j) << 7) + (i)]
 #define ptr_sb11(i, j) ptr_sb11[((j) << 7) + (i)]
 
+// Device function
 __device__ inline void vload(float4 &v, float const *addr)
 {
   v = *((float4 *)(addr));

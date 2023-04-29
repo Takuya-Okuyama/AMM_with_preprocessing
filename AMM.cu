@@ -8,11 +8,11 @@ void test(
 {
   if (p.kernel == "previousAMM")
   {
-    sgemm_previousAMM<DIM_M>(dm, true);
+    sgemm_previousAMM(dm, true);
   }
   else if (p.kernel == "proposedAMM")
   {
-    sgemm_proposedAMM<DIM_M>(dm, true);
+    sgemm_proposedAMM(dm, true);
   }
 
   cublasSgemm(dm.handle,
@@ -86,7 +86,7 @@ void execute_kernel(
   {
     if (warmup)
     {
-      sgemm_previousAMM<DIM_M>(dm);
+      sgemm_previousAMM(dm);
     }
     else
     {
@@ -94,7 +94,7 @@ void execute_kernel(
       p.error.clear();
       for (int i = 0; i < p.nreps; ++i)
       {
-        sgemm_previousAMM<DIM_M>(dm);
+        sgemm_previousAMM(dm);
 
         cudaDeviceSynchronize();
         cudaMemcpy(p.hY, dm.dY, sizeof(float) * p.m * p.n, cudaMemcpyDefault);
@@ -118,7 +118,7 @@ void execute_kernel(
       p.start_timer();
       for (int i = 0; i < p.nreps; ++i)
       {
-        sgemm_previousAMM<DIM_M>(dm);
+        sgemm_previousAMM(dm);
       }
       p.stop_timer();
     }
@@ -151,7 +151,7 @@ void execute_kernel(
                  dm.d_beta, 1,
                  dm.d_w);
 
-      sgemm_proposedAMM<DIM_M>(dm);
+      sgemm_proposedAMM(dm);
     }
     else
     {
@@ -159,7 +159,7 @@ void execute_kernel(
       p.error.clear();
       for (int i = 0; i < p.nreps; ++i)
       {
-        sgemm_proposedAMM<DIM_M>(dm);
+        sgemm_proposedAMM(dm);
 
         cudaDeviceSynchronize();
         cudaMemcpy(p.hY, dm.dY, sizeof(float) * p.m * p.n, cudaMemcpyDefault);
@@ -184,7 +184,7 @@ void execute_kernel(
     p.start_timer();
     for (int i = 0; i < p.nreps; ++i)
     {
-      sgemm_proposedAMM<DIM_M>(dm);
+      sgemm_proposedAMM(dm);
     }
     cudaDeviceSynchronize();
     p.stop_timer();

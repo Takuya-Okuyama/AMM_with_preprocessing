@@ -5,7 +5,6 @@
 #include "core_proposedAMM.cuh"
 #include <thrust/sort.h>
 
-template <uint32_t dim_M>
 void sgemm_proposedAMM(
     device_memory &dm,
     const bool sanity_check = false)
@@ -21,7 +20,7 @@ void sgemm_proposedAMM(
      *------------------------------------------------------------*/
     if (sanity_check && dm.k == dm.c)
     {
-      set_value_for_sanity_check<<<DIV_CEIL(dm.k, (uint64_t)dim_M), dim_M, 0, dm.stream_2>>>(
+      set_value_for_sanity_check<<<DIV_CEIL(dm.k, (uint64_t)128), 128, 0, dm.stream_2>>>(
           dm.d_weight,
           dm.k);
     }
@@ -66,7 +65,7 @@ void sgemm_proposedAMM(
     }
     else
     {
-      pick_index<<<DIV_CEIL(dm.c, (uint64_t)DIM_M), DIM_M, 0, dm.stream_2>>>(
+      pick_index<<<DIV_CEIL(dm.c, (uint64_t)128), 128, 0, dm.stream_2>>>(
           dm.d_pos,
           dm.d_rnd,
           dm.d_acc_weight,

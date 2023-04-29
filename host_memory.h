@@ -21,10 +21,10 @@ inline T DIV_CEIL(const T x, const T y)
 class host_memory
 {
 public:
-  uint64_t m = DIM_M;
-  uint64_t k = DIM_M;
-  uint64_t n = DIM_M;
-  uint32_t c = DIM_M;
+  uint64_t m = 128;
+  uint64_t k = 128;
+  uint64_t n = 128;
+  uint32_t c = 128;
 
   std::string kernel = "exact";
   std::string matrixType_A = "gaussian_0.0_1.0";
@@ -81,17 +81,17 @@ public:
       if (!strcmp(argv[i], "-m"))
       {
         m = std::atoi(argv[++i]);
-        m = DIV_CEIL(m, (uint64_t)DIM_M) * DIM_M;
+        m = DIV_CEIL(m, (uint64_t)128) * 128;
       }
       else if (!strcmp(argv[i], "-k"))
       {
         k = std::atoi(argv[++i]);
-        k = DIV_CEIL(k, (uint64_t)DIM_M) * DIM_M;
+        k = DIV_CEIL(k, (uint64_t)128) * 128;
       }
       else if (!strcmp(argv[i], "-n"))
       {
         n = std::atoi(argv[++i]);
-        n = DIV_CEIL(n, (uint64_t)DIM_M) * DIM_M;
+        n = DIV_CEIL(n, (uint64_t)128) * 128;
       }
       else if (!strcmp(argv[i], "-c"))
       {
@@ -234,7 +234,6 @@ public:
     if (verbose >= 1)
     {
       // basic information
-      printf("DIM_M,");
       printf("-m,");
       printf("-k,");
       printf("-n,");
@@ -264,7 +263,6 @@ public:
     }
 
     // basic information
-    printf("%d,", DIM_M);
     printf("%" PRIu64 ",", m);
     printf("%" PRIu64 ",", k);
     printf("%" PRIu64 ",", n);

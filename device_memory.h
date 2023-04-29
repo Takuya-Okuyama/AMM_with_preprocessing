@@ -16,6 +16,19 @@
 #include <random>
 #include <sstream>
 
+__global__ __launch_bounds__(128) void shift_and_scale(
+    float *d_ptr,
+    const uint64_t n,
+    const float a,
+    const float b)
+{
+  uint64_t idx = blockDim.x * blockIdx.x + threadIdx.x;
+  if (idx < n)
+  {
+    d_ptr[idx] = a + (b - a) * d_ptr[idx];
+  }
+}
+
 __global__ __launch_bounds__(128) void get_norms(
     float *d_normA,
     float *d_normB,
@@ -299,6 +312,12 @@ private:
     {
       curandGenerateLogNormal(gen, d_ptr, size_v * size_h, param1, param2);
     }
+    else if (matrixType == "uniform")
+    {
+      uint64_t n = size_v * size_h;
+      curandGenerateUniform(gen, d_ptr, n);
+      shift_and_scale<<<DIV_CEIL(n, (uint64_t)128), 128>>>(d_ptr, n, param1, param2);
+    }
 
     float norm = 0.0f;
     cublasSnrm2(handle, size_v * size_h, d_ptr, 1, &norm);
@@ -374,7 +393,7 @@ __device__ __forceinline__ float get_rand(uint32_t *x)
   return __int_as_float((y & 0x007FFFFF) | 0x3f800000) - 1.0f;
 }
 
-__global__ __launch_bounds__(DIM_M) void pick_index(
+__global__ __launch_bounds__(128) void pick_index(
     uint32_t *__restrict__ d_pos,
     uint32_t *__restrict__ d_rnd,
     const float *__restrict__ d_acc_weight,

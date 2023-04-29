@@ -1,6 +1,7 @@
 .vscode/*
 result/*
-script/*
+job/*
+
 
 # Logs and databases #
 *.log
