@@ -1,7 +1,8 @@
 .vscode/*
 result/*
+build/*
 job/*
-
+log/*
 
 # Logs and databases #
 *.log
